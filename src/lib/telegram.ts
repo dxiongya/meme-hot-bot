@@ -250,41 +250,48 @@ function renderMemeRow(
     : (/[…\.]{2,}/.test(tableAddr) ? "" : tableAddr);
 
   // ── Layout ──
-  // Line 1 (verdict): stars · name · chain · 异动 label
-  // Line 2 (size):    市值 · 币价 · 🐋 smart
-  // Line 3 (CA):      copy-paste contract
-  // Line 4-6 (三问):  🚀 涨因 / 🪪 是什么 / 🧭 叙事
-  // Line 7 (heat):    热度/讨论 — small footer, low priority
-  // (K-line is appended by caller as 2 lines)
-  const lines: string[] = [];
+  // Section A (header):    title + size + CA(tap-to-copy hint)
+  // Section B (narrative): 涨因 / 是什么 / 叙事
+  // Section C (footer):    small text 热度/讨论
+  // Sections separated by blank lines so the eye locks on the verdict
+  // first, then dives into narrative. User feedback: previous flat
+  // layout felt cramped; tap-to-copy on CA wasn't visually obvious.
+  const sections: string[][] = [];
 
+  const header: string[] = [];
   const titleParts: string[] = [`${stars || "🔥"} <b>${escapeHtml(name)}</b>`];
   if (chain) titleParts.push(`<i>${escapeHtml(chain)}</i>`);
-  if (anomaly) titleParts.push(escapeHtml(anomaly));
-  lines.push(titleParts.join(" · "));
+  if (anomaly) titleParts.push(`<b>${escapeHtml(anomaly)}</b>`);
+  header.push(titleParts.join(" · "));
 
   const sizeParts: string[] = [];
   if (mcap) sizeParts.push(`市值 <b>${escapeHtml(mcap)}</b>`);
-  if (price) sizeParts.push(`币价 ${escapeHtml(price)}`);
-  if (smart && /smart|kol|=\d/.test(smart)) sizeParts.push(`🐋 ${escapeHtml(smart)}`);
-  if (sizeParts.length) lines.push(sizeParts.join(" · "));
+  if (price) sizeParts.push(`币价 <b>${escapeHtml(price)}</b>`);
+  if (smart && /smart|kol|=\d/.test(smart)) sizeParts.push(`🐋 <b>${escapeHtml(smart)}</b>`);
+  if (sizeParts.length) header.push(sizeParts.join(" · "));
 
   if (addr && addr.length >= 20) {
-    lines.push(`CA <code>${escapeHtml(addr)}</code>`);
+    // 📋 emoji + "点击复制" hint makes the tap-to-copy affordance
+    // visible. The whole line wraps in <code> so any tap on the row
+    // copies the CA on mobile.
+    header.push(`📋 CA · <i>点击复制</i>\n<code>${escapeHtml(addr)}</code>`);
   }
+  sections.push(header);
 
   if (narr) {
-    if (narr.reason) lines.push(`🚀 涨因：${escapeHtml(narr.reason.slice(0, 180))}`);
-    if (narr.what_is) lines.push(`🪪 是什么：${escapeHtml(narr.what_is.slice(0, 180))}`);
-    if (narr.direction) lines.push(`🧭 叙事：${escapeHtml(narr.direction.slice(0, 180))}`);
+    const narrative: string[] = [];
+    if (narr.reason) narrative.push(`🚀 <b>涨因</b>：${escapeHtml(narr.reason.slice(0, 180))}`);
+    if (narr.what_is) narrative.push(`🪪 <b>是什么</b>：${escapeHtml(narr.what_is.slice(0, 180))}`);
+    if (narr.direction) narrative.push(`🧭 <b>叙事</b>：${escapeHtml(narr.direction.slice(0, 180))}`);
+    if (narrative.length) sections.push(narrative);
   }
 
   const footer: string[] = [];
   if (heat) footer.push(`热度 ${escapeHtml(heat)}`);
   if (disc) footer.push(`讨论 ${escapeHtml(disc)}`);
-  if (footer.length) lines.push(`<i>${footer.join(" · ")}</i>`);
+  if (footer.length) sections.push([`<i>${footer.join(" · ")}</i>`]);
 
-  return lines.join("\n");
+  return sections.map((s) => s.join("\n")).join("\n\n");
 }
 
 /**
@@ -405,8 +412,10 @@ async function renderCopycatCards(rawSection: string): Promise<string[]> {
     const reason = pick("近期涨因") ?? pick("近期原因");
     const risk = pick("风险提示");
 
-    const lines: string[] = [];
-    lines.push(`🪞 <b>${escapeHtml(sym)}</b>${meta ? ` · <i>${escapeHtml(meta)}</i>` : ""}`);
+    const sections: string[][] = [];
+    const header: string[] = [`🪞 <b>${escapeHtml(sym)}</b>${meta ? ` · <i>${escapeHtml(meta)}</i>` : ""}`];
+    sections.push(header);
+
     for (const r of tableRows) {
       // Flag a chain whose 1h is crashing — copycat header brags about
       // "聪明钱 35 次买入" but eth might be -60%, which the user needs
@@ -414,31 +423,34 @@ async function renderCopycatCards(rawSection: string): Promise<string[]> {
       const chgNum = parseFloat(r.chg.replace(/[^0-9.+-]/g, ""));
       const crashEmoji = isFinite(chgNum) && chgNum <= -10 ? "📉 " : "";
 
+      const memberLines: string[] = [];
       const head: string[] = [`${crashEmoji}<b>${escapeHtml(r.chain)}</b>`];
       if (r.mcap) head.push(`市值 <b>${escapeHtml(r.mcap)}</b>`);
-      if (r.chg) head.push(`1h ${escapeHtml(r.chg)}`);
+      if (r.chg) head.push(`1h <b>${escapeHtml(r.chg)}</b>`);
       if (r.price) head.push(escapeHtml(r.price));
       const tags: string[] = [];
       if (r.smart && r.smart !== "0") tags.push(`🐋${escapeHtml(r.smart)}`);
       if (r.kol && r.kol !== "0") tags.push(`KOL${escapeHtml(r.kol)}`);
       if (r.risk) tags.push(escapeHtml(r.risk));
       if (tags.length) head.push(tags.join(" "));
-      lines.push(`  • ${head.join(" · ")}`);
+      memberLines.push(head.join(" · "));
       if (r.ca && r.ca.length >= 20) {
-        lines.push(`    CA <code>${escapeHtml(r.ca)}</code>`);
+        memberLines.push(`📋 CA · <i>点击复制</i>\n<code>${escapeHtml(r.ca)}</code>`);
       }
       const kl = klineMap.get(`${r.chain.toLowerCase()}:${r.ca.toLowerCase()}`)
               ?? klineMap.get(`${r.chain.toLowerCase()}:${r.ca}`);   // sol = case-sensitive
-      if (kl) {
-        lines.push(...kl.split("\n").map((s) => `    ${s}`));
-      }
+      if (kl) memberLines.push(kl);
+      sections.push(memberLines);
     }
-    if (reason) lines.push(`🚀 涨因：${escapeHtml(reason.slice(0, 260))}`);
-    if (what) lines.push(`🪪 是什么：${escapeHtml(what.slice(0, 220))}`);
-    if (direction) lines.push(`🧭 叙事：${escapeHtml(direction.slice(0, 220))}`);
-    if (risk) lines.push(`⚠️ 风险：${escapeHtml(risk.slice(0, 220))}`);
 
-    cards.push(lines.join("\n"));
+    const narrative: string[] = [];
+    if (reason) narrative.push(`🚀 <b>涨因</b>：${escapeHtml(reason.slice(0, 260))}`);
+    if (what) narrative.push(`🪪 <b>是什么</b>：${escapeHtml(what.slice(0, 220))}`);
+    if (direction) narrative.push(`🧭 <b>叙事</b>：${escapeHtml(direction.slice(0, 220))}`);
+    if (risk) narrative.push(`⚠️ <b>风险</b>：${escapeHtml(risk.slice(0, 220))}`);
+    if (narrative.length) sections.push(narrative);
+
+    cards.push(sections.map((s) => s.join("\n")).join("\n\n"));
   }
   return cards;
 }

@@ -122,7 +122,7 @@ export function renderKlineSparkline(
 
   return [
     `📊 <code>${spark}</code> ${arrow} <b>${sign}${pct.toFixed(1)}%</b> · ${windowLabel}`,
-    `${fmtPrice(open)} → ${fmtPrice(close)} · 量 ${fmtUsdShort(totalVol)}`,
+    `${fmtPrice(open)} → <b>${fmtPrice(close)}</b> · 量 <b>${fmtUsdShort(totalVol)}</b>`,
   ].join("\n");
 }
 
