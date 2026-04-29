@@ -199,8 +199,17 @@ async function evaluateUpdate(s: PendingSignal): Promise<UpdateDecision> {
       const t = newEnrichment.evidence.high_follower_tweet;
       lines.push(`🐦 @${escapeHtml(t.screen_name)} (${Math.round(t.followers / 1000)}k 粉)：${escapeHtml(t.text.slice(0, 160))}`);
     }
-    if (newEnrichment.key_entities.length > 0) {
-      lines.push(`🏷 关键实体：${escapeHtml(newEnrichment.key_entities.join(" / "))}`);
+    // Render entities with their LLM-judged evidence quote so the user
+    // can verify the connection rather than trust a bare label. (Past
+    // bug: GOBLIN got tagged "musk" with no evidence shown — turned
+    // out to be perfume musk in someone's bio.)
+    for (const k of newEnrichment.key_entities) {
+      const ev = newEnrichment.entity_evidence?.[k];
+      if (ev?.text) {
+        lines.push(`🏷 <b>${escapeHtml(k)}</b>：${escapeHtml(ev.text.slice(0, 200))}`);
+      } else {
+        lines.push(`🏷 <b>${escapeHtml(k)}</b>`);
+      }
     }
   }
   lines.push(`<i>触发：${escapeHtml(reasons.join(" · "))}</i>`);
