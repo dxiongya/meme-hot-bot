@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+*.log
+.DS_Store
+
+# Brain — runtime markdown scratch space; not for distribution.
+# Anchor to repo root with leading slash so we don't accidentally
+# ignore src/lib/brain/ (the indexer/reader/writer code).
+/brain/
+
+# Local artifacts
+.tmp/
+*.tsbuildinfo

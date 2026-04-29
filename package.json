@@ -1,0 +1,34 @@
+{
+  "name": "crypto-radar-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node --import tsx/esm src/index.ts",
+    "migrate": "tsx src/db/migrate.ts",
+    "scan": "tsx scripts/scan-once.ts",
+    "reindex": "tsx scripts/reindex.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@mariozechner/pi-agent-core": "^0.67.6",
+    "@mariozechner/pi-ai": "^0.67.6",
+    "dotenv": "^16.4.5",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.6.14",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.1",
+    "playwright": "^1.59.1",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.10",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
