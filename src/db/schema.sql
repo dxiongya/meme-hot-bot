@@ -175,6 +175,14 @@ CREATE TABLE IF NOT EXISTS token_analyses (
   -- Processed tweets (avoid re-analyzing)
   processed_tweet_ids   TEXT[] NOT NULL DEFAULT '{}',
 
+  -- Raw safety + market snapshot from the most recent scan. Persisted
+  -- so the premium module's hard-gate filter (single-maker / honeypot
+  -- / dev-hold / bundler) can run without re-fetching gmgn. JSONB
+  -- shape: {smart_degen_count, renowned_count, holder_count, age_h,
+  -- dev_team_hold_rate, bundler_rate, is_honeypot, rug_ratio, chg5m,
+  -- volume, swaps, source}
+  last_safety           JSONB,
+
   -- Timestamps
   first_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_analyzed_at      TIMESTAMPTZ,
@@ -182,6 +190,8 @@ CREATE TABLE IF NOT EXISTS token_analyses (
 
   PRIMARY KEY (chain, address)
 );
+-- Idempotent retro-add for existing dbs that pre-date last_safety.
+ALTER TABLE token_analyses ADD COLUMN IF NOT EXISTS last_safety JSONB;
 CREATE INDEX IF NOT EXISTS ta_heat  ON token_analyses (heat_score DESC) WHERE passed = false;
 CREATE INDEX IF NOT EXISTS ta_chain ON token_analyses (chain, heat_score DESC) WHERE passed = false;
 CREATE INDEX IF NOT EXISTS ta_anom  ON token_analyses (latest_anomaly_score DESC) WHERE passed = false;
@@ -206,3 +216,128 @@ CREATE TABLE IF NOT EXISTS copycat_pushes (
   push_count         INT NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS copycat_pushes_last ON copycat_pushes (last_pushed_at DESC);
+
+-- =============================================================
+-- premium module — high-bar filtered alerts + outcome learning
+-- =============================================================
+-- premium_signals: every alert pushed via the premium bot. Stores a
+-- snapshot of all filter inputs and the three-question narrative AT
+-- THE MOMENT WE PUSHED, so the reflector can later compare success vs
+-- failed signals and extract patterns. The 2x judgment is "(peak_mcap
+-- AFTER pushed_at) / entry_mcap >= 2.0" — entry is the price the user
+-- saw when we pushed.
+CREATE TABLE IF NOT EXISTS premium_signals (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scan_id               UUID,
+  chain                 TEXT NOT NULL,
+  address               TEXT NOT NULL,
+  symbol                TEXT,
+
+  pushed_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  entry_price           NUMERIC NOT NULL,
+  entry_mcap            NUMERIC NOT NULL,
+
+  -- Snapshot of all filter inputs (smart_count, kol_count, vol_h1,
+  -- swaps_h1, holders, dev_team_hold_rate, bundler_rate, chg1h, chg5m,
+  -- liquidity, etc.) — used by the reflector to learn which gates
+  -- matter most.
+  filter_snapshot       JSONB NOT NULL,
+
+  -- Three-question content (verbatim). Reflector reads these to
+  -- correlate narrative wording with outcomes.
+  narrative_snapshot    JSONB NOT NULL,
+
+  -- Cross-chain cluster context. If this token is part of a
+  -- same-narrative cluster across chains, we record the chosen-chain
+  -- reasoning so we can learn which chain tends to win.
+  cluster_key           TEXT,
+  cluster_chains        TEXT[],
+  cluster_chosen_reason TEXT,
+
+  -- Outcome (filled by tracker.ts). NULL until first sample lands.
+  peak_mcap             NUMERIC,
+  peak_at               TIMESTAMPTZ,
+  peak_pct              NUMERIC,                       -- (peak/entry - 1)
+  outcome_status        TEXT NOT NULL DEFAULT 'pending', -- pending | success | failed | tracking_error
+  outcome_reflection    TEXT,
+  outcome_finalized_at  TIMESTAMPTZ,
+
+  -- Per-checkpoint snapshots so we can plot trajectories.
+  -- Keys: '30m' | '1h' | '3h' | '6h' | '24h'. Each value:
+  --   { ts, price, mcap, source }
+  outcome_samples       JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  -- Telegram message bookkeeping for the "push once + reply for
+  -- updates" rule. Stored so the 5-min monitor can fire reply messages
+  -- threaded under the original (Telegram reply_to_message_id), giving
+  -- the user a single coherent thread per token instead of repeated
+  -- new cards.
+  telegram_message_id   BIGINT,
+  last_update_at        TIMESTAMPTZ,
+  update_count          INT NOT NULL DEFAULT 0,
+  -- xapi external-search enrichment captured at push time and on each
+  -- update (recency / influence / key-entity tags from web+twitter).
+  enrichment            JSONB
+);
+CREATE INDEX IF NOT EXISTS premium_signals_pending
+  ON premium_signals (outcome_status, pushed_at) WHERE outcome_status = 'pending';
+CREATE INDEX IF NOT EXISTS premium_signals_addr
+  ON premium_signals (chain, address, pushed_at DESC);
+CREATE INDEX IF NOT EXISTS premium_signals_pushed
+  ON premium_signals (pushed_at DESC);
+
+-- premium_learnings: distilled rules that emerge from reflection.
+-- Three sources: 'auto' (LLM-generated from outcome diffs), 'chat'
+-- (user told us via the chat bot), 'manual'.
+-- Pattern types let the filter pipeline pull only the rules it can
+-- actually apply at filter time.
+CREATE TABLE IF NOT EXISTS premium_learnings (
+  id           BIGSERIAL PRIMARY KEY,
+  source       TEXT NOT NULL,
+  pattern_type TEXT NOT NULL,             -- narrative | metric_threshold | bot_signature | red_flag | chain_preference
+  rule_text    TEXT NOT NULL,             -- human-readable
+  evidence     JSONB,                     -- {success_signals: [uuid...], counter_signals: [uuid...]}
+  applied_count INT NOT NULL DEFAULT 0,
+  hit_rate     NUMERIC,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  active       BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS premium_learnings_active
+  ON premium_learnings (pattern_type, active, created_at DESC);
+
+-- premium_chat_log: conversation with the premium bot.
+-- 'in' = user→bot, 'out' = bot→user. Used as training corpus for the
+-- learner and as audit trail.
+CREATE TABLE IF NOT EXISTS premium_chat_log (
+  id                   BIGSERIAL PRIMARY KEY,
+  ts                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  direction            TEXT NOT NULL,             -- 'in' | 'out'
+  text                 TEXT NOT NULL,
+  parsed_intent        TEXT,                      -- 'lookup' | 'feedback' | 'directive' | 'bot_report'
+  ca                   TEXT,
+  related_signal_id    UUID,
+  resulting_learning_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS premium_chat_log_ts ON premium_chat_log (ts DESC);
+
+-- bot_signatures: learned bot/spam patterns used to filter tweet
+-- noise during meme/premium scoring. Three signature types:
+--   'screen_name_regex' — matches @handle
+--   'text_regex'        — matches tweet body
+--   'follower_pattern'  — JSON predicate over account metadata
+-- Source 'auto' = system inferred from outcome failures; 'chat' =
+-- user told us. NEVER auto-activate without user confirmation
+-- (default active=false until reviewed) — false-positives kill alpha.
+CREATE TABLE IF NOT EXISTS bot_signatures (
+  id             BIGSERIAL PRIMARY KEY,
+  signature_type TEXT NOT NULL,
+  pattern        TEXT NOT NULL,
+  source         TEXT NOT NULL,
+  examples       JSONB,                      -- sample tweets/accounts that triggered the rule
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  active         BOOLEAN NOT NULL DEFAULT FALSE,
+  hit_count      INT NOT NULL DEFAULT 0,
+  notes          TEXT
+);
+CREATE INDEX IF NOT EXISTS bot_signatures_active
+  ON bot_signatures (signature_type, active);

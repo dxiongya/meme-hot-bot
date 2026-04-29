@@ -20,6 +20,11 @@ import { startPositionMonitor } from "./modules/positions/index.js";
 // Telegram inbound bot — answers CA lookups from the configured chat
 import { startTelegramInbound } from "./lib/telegram-inbound.js";
 
+// Premium module — high-bar filtered alerts on a separate bot, with
+// 5-min reply-style updates and outcome learning.
+import { startPremiumScan } from "./modules/premium/jobs/scan.js";
+import { startPremiumMonitor } from "./modules/premium/jobs/monitor.js";
+
 async function bootstrap() {
   installGlobalProxy();  // undici ProxyAgent — affects pi-ai LLM fetches too
 
@@ -40,7 +45,7 @@ async function bootstrap() {
       ok: true,
       ts: new Date().toISOString(),
       llm: { provider: config.llm.provider, model: config.llm.model },
-      modules: ["meme"],
+      modules: ["meme", "premium"],
     })
   );
 
@@ -58,6 +63,8 @@ async function bootstrap() {
   startMemeScheduler();
   startPositionMonitor();
   startTelegramInbound();
+  startPremiumScan();
+  startPremiumMonitor();
 }
 
 bootstrap().catch((e) => { console.error(e); process.exit(1); });

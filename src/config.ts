@@ -37,6 +37,11 @@ export const config = {
     enabled: (process.env.TELEGRAM_ENABLED ?? "true") === "true",
     botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
     chatId: process.env.TELEGRAM_CHAT_ID ?? "",
+    /** Premium module — independent bot for high-bar filtered alerts +
+     *  bidirectional chat learning. Falls back to '' (disabled) when
+     *  not configured so the rest of the system runs unaffected. */
+    premiumBotToken: process.env.TELEGRAM_PREMIUM_BOT_TOKEN ?? "",
+    premiumChatId: process.env.TELEGRAM_PREMIUM_CHAT_ID ?? "",
   },
   llm: {
     provider: (process.env.LLM_PROVIDER ?? "anthropic") as

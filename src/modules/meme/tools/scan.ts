@@ -507,6 +507,7 @@ async function upsertAnalysis(row: {
   last_price: number | null;
   last_market_cap: number | null;
   last_liquidity: number | null;
+  last_safety?: Record<string, unknown> | null;
 }): Promise<void> {
   try {
     await db.query(
@@ -518,8 +519,9 @@ async function upsertAnalysis(row: {
           no_discussion_strikes, passed,
           processed_tweet_ids,
           last_price, last_market_cap, last_liquidity,
+          last_safety,
           last_analyzed_at, analyzed_count)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, NOW(), 1)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, NOW(), 1)
        ON CONFLICT (chain, address) DO UPDATE SET
          symbol = COALESCE(EXCLUDED.symbol, token_analyses.symbol),
          narrative_what_is = COALESCE(EXCLUDED.narrative_what_is, token_analyses.narrative_what_is),
@@ -535,6 +537,7 @@ async function upsertAnalysis(row: {
          last_price = EXCLUDED.last_price,
          last_market_cap = EXCLUDED.last_market_cap,
          last_liquidity = EXCLUDED.last_liquidity,
+         last_safety = COALESCE(EXCLUDED.last_safety, token_analyses.last_safety),
          last_analyzed_at = NOW(),
          analyzed_count = token_analyses.analyzed_count + 1`,
       [
@@ -545,6 +548,7 @@ async function upsertAnalysis(row: {
         row.no_discussion_strikes, row.passed,
         row.processed_tweet_ids,
         row.last_price, row.last_market_cap, row.last_liquidity,
+        row.last_safety ? JSON.stringify(row.last_safety) : null,
       ],
     );
   } catch (e) {
@@ -999,10 +1003,40 @@ async function prepareCandidate(source: any, prior: AnalysisRow | undefined): Pr
 
 // ── Phase C (per-candidate): compute metrics + persist + build output ──
 
+/**
+ * Snapshot raw safety + market fields from a gmgn/GT source row. The
+ * premium module reads this from token_analyses.last_safety to apply
+ * its hard-gate filter (single-maker, honeypot, dev-hold) without
+ * re-fetching gmgn. Keep keys stable — the filter and reflector both
+ * rely on this exact shape.
+ */
+function buildSafetySnapshot(source: any): Record<string, unknown> {
+  return {
+    smart_degen_count: Number(source?.smart_degen_count ?? 0),
+    renowned_count: Number(source?.renowned_count ?? 0),
+    holder_count: Number(source?.holder_count ?? source?.holders ?? 0),
+    age_h: source?.age_h ?? null,
+    dev_team_hold_rate: Number(source?.dev_team_hold_rate ?? 0),
+    bundler_rate: Number(source?.bundler_rate ?? 0),
+    is_honeypot: Number(source?.is_honeypot ?? 0),
+    rug_ratio: Number(source?.rug_ratio ?? 0),
+    chg5m: Number(source?.chg5m ?? 0),
+    chg1h: Number(source?.chg1h ?? 0),
+    volume_h1: Number(source?.volume ?? source?.volume_h1 ?? 0),
+    swaps_h1: Number(source?.swaps ?? source?.swaps_h1 ?? 0),
+    liquidity: Number(source?.liquidity ?? 0),
+    market_cap: Number(source?.market_cap ?? 0),
+    price: Number(source?.price ?? 0),
+    snapshot_at: new Date().toISOString(),
+    source: source?.source ?? source?.feed ?? "gmgn",
+  };
+}
+
 async function finalizeCandidate(prep: PreparedCandidate, answers: ThreeAnswers | null): Promise<CandidateOutput> {
   const { source, prior, curScore, delta, newHistory, twitter_hits_raw, web_hits_arr, freshTweets } = prep;
   const { chain, address, symbol } = source;
   const nowMs = Date.now();
+  const safety = buildSafetySnapshot(source);
 
   const hasAnyDiscussion = freshTweets.length > 0 || web_hits_arr.length > 0 || (prior?.discussion_count ?? 0) > 0;
 
@@ -1024,6 +1058,7 @@ async function finalizeCandidate(prep: PreparedCandidate, answers: ThreeAnswers 
       last_price: Number(source.price ?? 0),
       last_market_cap: Number(source.market_cap ?? 0),
       last_liquidity: Number(source.liquidity ?? 0),
+      last_safety: safety,
     });
     const base: CandidateOutput = {
       chain, symbol: symbol ?? "?", address,
@@ -1100,6 +1135,7 @@ async function finalizeCandidate(prep: PreparedCandidate, answers: ThreeAnswers 
     last_price: Number(source.price ?? 0),
     last_market_cap: Number(source.market_cap ?? 0),
     last_liquidity: Number(source.liquidity ?? 0),
+    last_safety: safety,
   });
 
   const star = starRating({
