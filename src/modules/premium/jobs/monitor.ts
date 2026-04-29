@@ -71,6 +71,39 @@ async function loadPendingSignals(): Promise<PendingSignal[]> {
   }));
 }
 
+/**
+ * Fetch live mcap+price from DexScreener. Called at monitor time so
+ * the reply update reflects RIGHT NOW, not the stale last_market_cap
+ * from the last 15-min meme scan. Returns null on any failure — the
+ * monitor falls back to the cached value.
+ */
+async function fetchLiveQuote(chain: string, address: string): Promise<{ mcap: number; price: number } | null> {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${address}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    const pairs: any[] = data?.pairs ?? [];
+    if (pairs.length === 0) return null;
+    // Match the chain to avoid grabbing a wrapped-version on another network.
+    const wantedChain = chain.toLowerCase() === "eth" ? "ethereum"
+                       : chain.toLowerCase() === "sol" ? "solana"
+                       : chain.toLowerCase();
+    const matching = pairs.filter((p) => (p.chainId ?? "").toLowerCase() === wantedChain);
+    const list = matching.length > 0 ? matching : pairs;
+    list.sort((a, b) => (Number(b?.liquidity?.usd ?? 0)) - (Number(a?.liquidity?.usd ?? 0)));
+    const top = list[0];
+    const mcap = Number(top?.marketCap ?? top?.fdv ?? 0);
+    const price = Number(top?.priceUsd ?? 0);
+    if (!isFinite(mcap) || mcap === 0) return null;
+    return { mcap, price };
+  } catch (e) {
+    console.warn(`[premium monitor] live quote failed for ${chain}/${address}:`, e);
+    return null;
+  }
+}
+
 function fmtUsd(n: number): string {
   if (!isFinite(n) || n === 0) return "?";
   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
@@ -92,9 +125,14 @@ interface UpdateDecision {
 async function evaluateUpdate(s: PendingSignal): Promise<UpdateDecision> {
   const reasons: string[] = [];
 
-  // 1. mcap step
+  // 1. mcap step — query DexScreener for the up-to-the-minute mcap
+  // rather than relying on token_analyses.last_market_cap (which only
+  // refreshes every 15 min when the token is re-analyzed). Fall back
+  // to cached value on fetch failure so we still send updates when
+  // dexscreener hiccups.
   const baseMcap = s.entry_mcap > 0 ? s.entry_mcap : 1;
-  const liveMcap = s.last_market_cap;
+  const live = await fetchLiveQuote(s.chain, s.address);
+  const liveMcap = live?.mcap ?? s.last_market_cap;
   const moveX = liveMcap / baseMcap;
   // Trigger only when crossing a NEW step we haven't reported.
   // update_count of N corresponds to having reported up through (1+MCAP_STEP)^N.
@@ -145,12 +183,17 @@ async function evaluateUpdate(s: PendingSignal): Promise<UpdateDecision> {
     return { shouldUpdate: false, body: "", newEnrichment };
   }
 
+  // Live mcap line ALWAYS appears, regardless of trigger type. User
+  // wants every reply update to lead with the current price/mcap so
+  // they don't have to scroll back up to the original card to gauge
+  // whether the new info matters.
   const lines: string[] = [];
   lines.push(`🔔 <b>${escapeHtml(s.symbol ?? "?")}</b> 更新`);
-  if (hitMcapStep) {
-    const pct = ((liveMcap / baseMcap) - 1) * 100;
-    lines.push(`💰 市值 <b>${fmtUsd(liveMcap)}</b> (推送时 ${fmtUsd(s.entry_mcap)} · <b>${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%</b>)`);
-  }
+
+  const livePct = baseMcap > 0 ? ((liveMcap / baseMcap) - 1) * 100 : 0;
+  const moveEmoji = livePct >= 100 ? "🚀" : livePct >= 30 ? "📈" : livePct <= -30 ? "📉" : "→";
+  lines.push(`💰 市值 <b>${fmtUsd(liveMcap)}</b> · ${moveEmoji} 较推送 <b>${livePct >= 0 ? "+" : ""}${livePct.toFixed(0)}%</b> (入场 ${fmtUsd(s.entry_mcap)})`);
+
   if (newEnrichment) {
     if (newEnrichment.evidence.high_follower_tweet) {
       const t = newEnrichment.evidence.high_follower_tweet;
